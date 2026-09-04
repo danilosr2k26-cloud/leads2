@@ -32,7 +32,7 @@ const nodemailer = require("nodemailer");
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "258055";
 const AUTH_SECRET = process.env.AUTH_SECRET || process.env.SUPABASE_JWT_SECRET || crypto.randomBytes(16).toString("hex");
 const ORIGENS = (process.env.ALLOWED_ORIGINS || "*").split(",").map((s) => s.trim());
 
