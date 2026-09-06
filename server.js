@@ -32,7 +32,7 @@ const nodemailer = require("nodemailer");
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "258055";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const AUTH_SECRET = process.env.AUTH_SECRET || process.env.SUPABASE_JWT_SECRET || crypto.randomBytes(16).toString("hex");
 const ORIGENS = (process.env.ALLOWED_ORIGINS || "*").split(",").map((s) => s.trim());
 
@@ -130,7 +130,35 @@ function salvarArquivo(lista) {
 
 /* ---- converte uma linha do banco para o formato usado pelo painel ---- */
 function mapLinha(r) {
-  return { id: r.id, criadoEm: r.criado_em, status: r.status, nota: r.nota || "", origem: r.origem || "", ip: r.ip || "", dados: r.dados || {} };
+  return { id: r.id, criadoEm: r.criado_em, status: r.status, nota: r.nota || "", origem: r.origem || "", ip: r.ip || "", aparelho: r.aparelho || "", userAgent: r.user_agent || "", dados: r.dados || {} };
+}
+
+// monta uma descrição amigável do aparelho a partir do User-Agent (+ modelo via client hints, se enviado)
+function parseAparelho(ua, modeloCH) {
+  ua = ua || "";
+  let os = "", m;
+  if (m = ua.match(/(iPhone|iPad|iPod)[^;]*OS ([\d_]+)/)) os = "iOS " + m[2].replace(/_/g, ".");
+  else if (m = ua.match(/Android ?([\d.]+)?/)) os = "Android" + (m[1] ? " " + m[1] : "");
+  else if (/Windows NT 10/.test(ua)) os = "Windows 10/11";
+  else if (m = ua.match(/Windows NT ([\d.]+)/)) os = "Windows " + m[1];
+  else if (/Mac OS X/.test(ua)) os = "macOS";
+  else if (/Linux/.test(ua)) os = "Linux";
+  let modelo = (modeloCH || "").trim();
+  if (!modelo || modelo === "K") {
+    if (/iPhone/.test(ua)) modelo = "iPhone";
+    else if (/iPad/.test(ua)) modelo = "iPad";
+    else if (m = ua.match(/Android[^;]*;\s*([^;)]+?)\s+Build\//)) modelo = m[1].trim();
+    else if (m = ua.match(/Android[^;]*;\s*([^;)]+?)\)/)) modelo = m[1].trim();
+    if (modelo === "K" || modelo === "wv") modelo = "";
+  }
+  let nav = "";
+  if (/EdgA?\//.test(ua)) nav = "Edge";
+  else if (/SamsungBrowser/.test(ua)) nav = "Samsung Internet";
+  else if (/OPR\/|Opera/.test(ua)) nav = "Opera";
+  else if (/Firefox\//.test(ua)) nav = "Firefox";
+  else if (/Chrome\//.test(ua)) nav = "Chrome";
+  else if (/Safari\//.test(ua)) nav = "Safari";
+  return [modelo, os, nav].filter(Boolean).join(" · ") || (ua ? ua.slice(0, 60) : "");
 }
 
 /* ---- camada de dados (funciona igual com Supabase ou arquivo) ---- */
@@ -138,7 +166,9 @@ async function inserirLead(lead) {
   if (supabase) {
     const { error } = await supabase.from(TABELA).insert({
       id: lead.id, criado_em: lead.criadoEm, status: lead.status,
-      nota: lead.nota, origem: lead.origem, ip: lead.ip, dados: lead.dados,
+      nota: lead.nota, origem: lead.origem, ip: lead.ip,
+      aparelho: lead.aparelho || "", user_agent: lead.userAgent || "",
+      dados: lead.dados,
     });
     if (error) throw new Error(error.message);
   } else {
@@ -306,11 +336,12 @@ app.post("/api/leads", corsLeads, limitar, async (req, res) => {
     if (body._gotcha) return res.json({ ok: true });
 
     // separa campos de controle dos dados do formulário
-    const { _origem, _gotcha, ...campos } = body;
+    const { _origem, _gotcha, ua: uaBody, modelo, ...campos } = body;
     const temAlgo = Object.values(campos).some((v) => String(v || "").trim());
     if (!temAlgo) return res.status(400).json({ ok: false, erro: "Envio vazio" });
 
-    const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+    const ip = (req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+    const ua = String(uaBody || req.headers["user-agent"] || "");
     const lead = {
       id: crypto.randomUUID(),
       criadoEm: new Date().toISOString(),
@@ -318,6 +349,8 @@ app.post("/api/leads", corsLeads, limitar, async (req, res) => {
       nota: "",
       origem: _origem || "",
       ip,
+      aparelho: parseAparelho(ua, modelo),   // modelo do aparelho (do User-Agent; ou client hints, se a landing enviar)
+      userAgent: ua,
       dados: campos,
     };
 
@@ -336,8 +369,8 @@ app.post("/api/leads", corsLeads, limitar, async (req, res) => {
 /* Login do painel */
 app.post("/api/login", (req, res) => {
   const { usuario, senha } = req.body || {};
-  const okUser = crypto.timingSafeEqual(Buffer.from(String(usuario || "")), Buffer.from(ADMIN_USER)) ||
-                 String(usuario || "") === ADMIN_USER;
+  const okUser = String(usuario || "").length === ADMIN_USER.length &&
+                 crypto.timingSafeEqual(Buffer.from(String(usuario || "")), Buffer.from(ADMIN_USER));
   const okSenha = String(senha || "").length === ADMIN_PASSWORD.length &&
                   crypto.timingSafeEqual(Buffer.from(String(senha)), Buffer.from(ADMIN_PASSWORD));
   if (!okUser || !okSenha) return res.status(401).json({ ok: false, erro: "Usuário ou senha inválidos" });
@@ -415,7 +448,7 @@ app.delete("/api/leads/:id", exigirLogin, async (req, res) => {
 /* Exporta CSV */
 app.get("/api/export", exigirLogin, async (req, res) => {
   const lista = await listarLeads();
-  const colunas = new Set(["criadoEm", "status", "origem"]);
+  const colunas = new Set(["criadoEm", "status", "origem", "aparelho"]);
   lista.forEach((l) => Object.keys(l.dados).forEach((k) => colunas.add(k)));
   const cols = [...colunas];
   const escapar = (v) => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
